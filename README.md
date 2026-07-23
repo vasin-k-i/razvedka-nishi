@@ -21,20 +21,23 @@ Claude сам ведёт исследование по 8 фазам, ходит 
 
 ## Установка
 
-Одной строкой (устанавливает в `~/.claude/skills/`):
+**Проще и надёжнее всего — попроси сам Claude Code поставить скилл.** Открой Claude Code и напиши:
+
+```
+Установи скилл «разведка ниши» из репозитория https://github.com/vasin-k-i/razvedka-nishi
+Склонируй его во временную папку и скопируй папку skills/razvedka-nishi в ~/.claude/skills/razvedka-nishi
+(создай ~/.claude/skills при необходимости). Потом покажи, что установилось, и напомни перезапустить Claude Code.
+```
+
+Claude сам склонирует репозиторий и положит скилл куда нужно — не надо возиться с терминалом.
+
+**Альтернатива — одной командой в терминале:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vasin-k-i/razvedka-nishi/main/install.sh | bash
 ```
 
-Или вручную:
-
-```bash
-git clone https://github.com/vasin-k-i/razvedka-nishi.git
-cd razvedka-nishi && bash install.sh
-```
-
-Потом **перезапусти Claude Code**.
+После установки **перезапусти Claude Code**, потом напиши `/razvedka-nishi`.
 
 ## Как пользоваться
 
