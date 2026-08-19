@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Частотность фраз: единая точка для всех проектов (кэш → Wordstat → Arsenkin).
+"""Частотность фраз: единая точка для всех проектов (кэш → Wordstat → XMLRiver → Arsenkin).
 
 Зачем. Частотность нужна везде — SEO-заводы (гейт на спрос перед генерацией),
 разбор ниш, разовые проверки руками. До этого модуля каждый проект ходил в Wordstat
@@ -9,17 +9,20 @@
 {}, ноль читался как «спроса нет», и 93% страниц ошибочно попали в «мёртвые» вместо
 честных 40–48%.
 
-Здесь три уровня, каждый закрывает дыру предыдущего:
+Здесь четыре уровня, каждый закрывает дыру предыдущего:
 
 1. **Глобальный кэш** `~/.seo-freq/cache.json` — общий на ВСЕ проекты. Одна и та же
    фраза, померенная заводом, больше не меряется заново разбором ниш. Дешевле любого API.
 2. **Yandex Cloud Wordstat** — бесплатно в рамках облака, но 100 запросов/час и строго
    ПО ОДНОЙ фразе за вызов. Годится для десятков фраз, не для сотен.
-3. **Arsenkin Tools** — платный добор, когда Wordstat кончился или фраз много.
-   Берёт ПАЧКУ за одну задачу (проверено: 3 фразы = 1 задача = 3 юнита), поэтому
-   на объёме он не «запасной», а прямо основной путь: 1 юнит/фразу ≈ 0.021–0.03 ₽.
+3. **XMLRiver** (Wordstat New) — ~25 ₽/1000 запросов, по одной фразе. Идёт раньше
+   Арсенкина, потому что тот же ключ открывает ещё и живую выдачу Яндекса/Google.
+4. **Arsenkin Tools** — берёт ПАЧКУ за одну задачу (проверено: 3 фразы = 1 задача =
+   3 юнита), 1 юнит/фразу ≈ 0.021–0.03 ₽. На объёме это самый быстрый путь.
 
 Пустой ответ провайдера НИКОГДА не пишется в кэш как 0 — это «не замерено».
+Разница между «спроса нет» и «не смогли померить» — то, ради чего написан модуль:
+на ней уже один раз построили ложный вывод (93% «мёртвых» страниц вместо 40–48%).
 
 Использование в коде:
     from freq import frequency
@@ -31,9 +34,12 @@ CLI:
     python3 modules/freq.py --in phrases.txt --no-paid        # только кэш+Wordstat
     python3 modules/freq.py --stats                            # что в кэше и сколько потрачено
 
-Ключи (значения НЕ здесь): YANDEX_CLOUD_API_KEY + YC_FOLDER_ID (Wordstat),
-ARSENKIN_API_TOKEN (добор). Берутся из окружения, затем из .env проекта,
-затем из общего стора ~/Projects/.secrets/.
+Ключи (значения НЕ здесь) — берутся из окружения, затем .env проекта, затем ~/Projects/.secrets/:
+    YANDEX_CLOUD_API_KEY + YC_FOLDER_ID   Wordstat (бесплатно, 100 запросов/час)
+    XMLRIVER_USER + XMLRIVER_KEY          XMLRiver (~25 ₽/1000, он же даёт живую выдачу)
+    ARSENKIN_API_TOKEN                    Arsenkin (~0.021–0.03 ₽/фраза, пачкой)
+
+Провайдер, которого нет в ключах, просто пропускается — модуль работает и на одном.
 """
 from __future__ import annotations
 
@@ -67,6 +73,7 @@ def _load_env() -> None:
         here.parents[2] / ".env",                       # корень проекта
         Path.home() / "Projects" / ".secrets" / "yandex-cloud.env",
         Path.home() / "Projects" / ".secrets" / "arsenkin-sites.env",
+        Path.home() / "Projects" / ".secrets" / "xmlriver.env",
     ]
     for c in cands:
         if not c.exists():
@@ -187,7 +194,79 @@ def _wordstat(phrases: list[str], region: int) -> dict[str, int]:
     return out
 
 
-# ── провайдер 2: Arsenkin Tools ──────────────────────────────────────────────
+# ── провайдер 2: XMLRiver (Wordstat New) ─────────────────────────────────────
+def _xmlriver(phrases: list[str], region: int) -> dict[str, int]:
+    """XMLRiver Wordstat New: по одной фразе за запрос, частота в TotalValue.
+
+    Эндпоинт `wordstat/new/json`, `pagetype=history` — вкладка «История»,
+    оттуда и берётся суммарная частотность. `pagetype=words` вернул бы саму фразу
+    плюс до 50 уточняющих (расширение семантики), но здесь нужна только частота.
+
+    ⚠️ Старый `wordstat/json` МЁРТВ: отвечает `{"code":101,"error":"Сбор старого
+    вордстата больше не доступен."}`. Не путать при копировании чужих примеров.
+    ⚠️ Пустой баланс приходит не как HTTP-ошибка, а как текст «На вашем счету
+    закончились деньги» в теле — молча даёт 0, если не проверять. Как и у Wordstat:
+    не смогли померить ≠ ноль.
+
+    Цена ~25 ₽ за 1000 запросов (дешевле на предоплате). Порядок вызова этого
+    провайдера — до Арсенкина, потому что тот же ключ открывает ещё и живую выдачу.
+    """
+    user = (os.environ.get("XMLRIVER_USER") or "").strip()
+    key = (os.environ.get("XMLRIVER_KEY") or "").strip()
+    if not user or not key or not phrases:
+        return {}
+
+    from urllib.parse import quote
+
+    out: dict[str, int] = {}
+    for ph in phrases:
+        url = (f"http://xmlriver.com/wordstat/new/json?user={user}&key={key}"
+               f"&query={quote(ph)}&regions={region}&device=&pagetype=history")
+        try:
+            with urllib.request.urlopen(url, timeout=40) as r:
+                raw = r.read().decode("utf-8", "replace")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [xmlriver] сеть на «{ph}»: {e}")
+            continue
+        if "закончились деньги" in raw or "ОШИБКА" in raw:
+            print("  [xmlriver] нет баланса — пропускаю провайдер")
+            break
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            print(f"  [xmlriver] не JSON на «{ph}»: {raw[:120]}")
+            continue
+        if isinstance(data, dict) and data.get("error"):
+            print(f"  [xmlriver] ошибка {data.get('code')}: {data.get('error')}")
+            break
+        val = _dig_total(data)
+        if val is None:
+            continue
+        out[ph] = val
+    return out
+
+
+def _dig_total(node) -> int | None:
+    """Найти TotalValue где угодно в ответе — структура json у XMLRiver плавает."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k.lower() in ("totalvalue", "total_value", "total"):
+                try:
+                    return int(str(v).replace(" ", ""))
+                except (TypeError, ValueError):
+                    pass
+            found = _dig_total(v)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _dig_total(item)
+            if found is not None:
+                return found
+    return None
+
+
+# ── провайдер 3: Arsenkin Tools ──────────────────────────────────────────────
 def _arsenkin_post(path: str, body: dict, token: str) -> dict:
     url = f"https://arsenkin.ru/api/tools/{path}"
     data = json.dumps(body, ensure_ascii=False).encode()
@@ -318,6 +397,21 @@ def frequency(phrases, *, region: int = REGION_RU, ws: str = DEFAULT_WS,
         save_cache(cache)
 
     rest = [p for p in todo if p not in got]
+    if rest and allow_paid:
+        # XMLRiver раньше Арсенкина: цена та же (~25 ₽/1000), но тот же ключ
+        # открывает живую выдачу Яндекса/Google, так что расход идёт в один кошелёк.
+        try:
+            got_xr = _xmlriver(rest, region)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [xmlriver] добор не удался: {e}")
+            got_xr = {}
+        for p, v in got_xr.items():
+            out[p] = {"freq": v, "source": "xmlriver"}
+            cache[_cache_key(p, region, ws)] = v
+        if got_xr:
+            save_cache(cache)
+            rest = [p for p in rest if p not in got_xr]
+
     if rest and allow_paid:
         if verbose:
             print(f"[freq] Wordstat закрыл {len(got)}, добираю Арсенкиным {len(rest)}")
