@@ -82,17 +82,19 @@ def _load_env() -> None:
 def normalize(phrase: str) -> str:
     """Привести фразу к виду, который принимают ОБА провайдера.
 
-    ⚠️ Arsenkin отвечает 422 JSON_VALIDATION_ERROR на кавычки-ёлочки и прочую типографику:
-    «мемориальный комплекс «малая земля»» роняло весь прогон. Заодно убираем операторы
-    Wordstat (" ! + - [ ]), иначе одна и та же тема кэшируется под разными ключами.
+    ⚠️ Arsenkin отвечает 422 JSON_VALIDATION_ERROR на ЛЮБУЮ пунктуацию в фразе и роняет
+    ЗАДАЧУ ЦЕЛИКОМ, а не одну строку: сначала поймали на кавычках-ёлочках
+    («мемориальный комплекс «малая земля»»), потом на запятой («кабардинка на выходные,
+    3 дня») — 180 фраз не замерились из-за одной. Поэтому подход белого списка:
+    оставляем только буквы, цифры и пробел. Заодно уходят операторы Wordstat
+    (" ! + [ ]), иначе одна тема кэшировалась бы под разными ключами.
     """
     import re as _re
 
     s = phrase.strip().lower()
-    s = s.replace("«", " ").replace("»", " ").replace("„", " ").replace("“", " ")
-    s = s.replace("”", " ").replace('"', " ").replace("'", " ").replace("`", " ")
-    s = s.replace("—", " ").replace("–", " ").replace("’", " ")
-    s = _re.sub(r"[!+\[\](){}<>|\\/*^~#$%&=;:]", " ", s)
+    s = s.replace("ё", "е")  # Wordstat не различает, а кэш иначе двоится
+    s = _re.sub(r"[^0-9a-zа-я\s-]", " ", s)   # белый список: буквы, цифры, пробел, дефис
+    s = _re.sub(r"\s*-\s*", " ", s)           # дефис как разделитель: API всё равно его так и трактует
     s = _re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -228,30 +230,57 @@ def _arsenkin(phrases: list[str], region: int, ws: str) -> dict[str, int]:
     out: dict[str, int] = {}
     todo = phrases[:room]
     for i in range(0, len(todo), ARSENKIN_BATCH):
-        batch = todo[i:i + ARSENKIN_BATCH]
+        out.update(_arsenkin_batch(todo[i:i + ARSENKIN_BATCH], region, ws, token))
+    return out
+
+
+def _arsenkin_batch(batch: list[str], region: int, ws: str, token: str) -> dict[str, int]:
+    """Одна задача. При 422 пачка делится пополам, пока не отсеется битая фраза.
+
+    ⚠️ Арсенкин валит ЗАДАЧУ ЦЕЛИКОМ из-за одной плохой строки: 180 маршрутов
+    не замерились из-за единственной запятой. normalize() чистит вход, но полагаться
+    только на него нельзя — сервис может не принять и что-то ещё, поэтому делим
+    пополам и теряем максимум одну фразу вместо всей пачки.
+    """
+    if not batch:
+        return {}
+    try:
         s = _arsenkin_post("set", {"tools_name": "wordstat",
                                    "data": {"type": 1, "queries": batch,
                                             "regions": [region], "ws": [ws], "device": ""}}, token)
-        tid, cost = s.get("task_id"), s.get("cost")
-        if not tid:
-            print(f"  [arsenkin] задача не поставлена: {s}")
+    except RuntimeError as e:
+        if "422" not in str(e):
+            raise
+        if len(batch) == 1:
+            print(f"  [arsenkin] фраза не принята, пропускаю: «{batch[0]}»")
+            return {}
+        mid = len(batch) // 2
+        print(f"  [arsenkin] 422 на пачке {len(batch)} — делю пополам")
+        return {**_arsenkin_batch(batch[:mid], region, ws, token),
+                **_arsenkin_batch(batch[mid:], region, ws, token)}
+
+    tid, cost = s.get("task_id"), s.get("cost")
+    if not tid:
+        print(f"  [arsenkin] задача не поставлена: {s}")
+        return {}
+    print(f"  [arsenkin] задача {tid}: {len(batch)} фраз, {cost} юнитов")
+    for _ in range(120):
+        time.sleep(5)
+        c = _arsenkin_post("check", {"task_id": tid}, token)
+        if str(c.get("status")) == "finish":
             break
-        print(f"  [arsenkin] задача {tid}: {len(batch)} фраз, {cost} юнитов")
-        for _ in range(120):
-            time.sleep(5)
-            c = _arsenkin_post("check", {"task_id": tid}, token)
-            if str(c.get("status")) == "finish":
-                break
-        else:
-            print(f"  [arsenkin] задача {tid} не завершилась за 10 мин — пропуск")
-            continue
-        g = _arsenkin_post("get", {"task_id": tid}, token)
-        table = (((g.get("result") or {}).get("data") or {}).get("result") or {})
-        for ph, by_region in table.items():
-            val = (by_region or {}).get(str(region), {}).get(ws)
-            if val is not None:
-                out[ph] = int(val)
-        _record_spend(units=int(cost or len(batch)))
+    else:
+        print(f"  [arsenkin] задача {tid} не завершилась за 10 мин — пропуск")
+        return {}
+
+    g = _arsenkin_post("get", {"task_id": tid}, token)
+    table = (((g.get("result") or {}).get("data") or {}).get("result") or {})
+    out: dict[str, int] = {}
+    for ph, by_region in table.items():
+        val = (by_region or {}).get(str(region), {}).get(ws)
+        if val is not None:
+            out[ph] = int(val)
+    _record_spend(units=int(cost or len(batch)))
     return out
 
 
