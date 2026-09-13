@@ -475,7 +475,13 @@ def frequency(phrases, *, region: int = REGION_RU, ws: str = DEFAULT_WS,
     if not todo:
         return out
 
-    got = _wordstat(todo, region)
+    # ⚠️ Yandex Cloud отдаёт ТОЛЬКО широкую частоту: операторы "" и ! он игнорирует.
+    # Раньше он вызывался при любом ws, возвращал широкую — и она ложилась в общий кэш
+    # под ключом `225|exact|…`/`225|quoted|…`. То есть `--ws exact` молча давал широкую
+    # частоту, завышенную в 5–20 раз, и отравлял кэш всем последующим проектам
+    # (поймано 13.09.2026: в кэше «стеллажи для склада» quoted=10 267 при живой 1 122).
+    # Фразовую/точную умеют только XMLRiver (оператор в самой фразе) и Арсенкин (ws=[…]).
+    got = _wordstat(todo, region) if ws == "base" else {}
     for p, v in got.items():
         out[p] = {"freq": v, "source": "wordstat"}
         cache[_cache_key(p, region, ws)] = v
